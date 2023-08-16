@@ -1,0 +1,11 @@
+%dw 2.0
+
+type auto_59820022_74cf_40d8_9e86_366dde3af136_Output_Payload = {|
+  CanonicalRequest: String, 
+  CanonicalRequestHash: String, 
+  Authentication: String, 
+  host: String, 
+  "x-amz-content-sha256": String, 
+  "x-amz-date": String
+|}
+

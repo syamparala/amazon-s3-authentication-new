@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+	<flow name="amazon-s3-authenticationFlow" doc:id="7edd25ec-9b5f-46af-b66f-f763e8733764" >
+		<http:listener doc:name="Listener" doc:id="6bddd736-aac3-4d42-be13-044da4fafd52" config-ref="HTTP_Listener_config" path="/upload" allowedMethods="PUT"/>
+		<ee:transform doc:name="save-orig-payload" doc:id="54a78779-e9b8-4b6b-add0-101299caf924" >
+			<ee:message >
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="origPayload" ><![CDATA[%dw 2.0
+output application/java
+---
+payload.^raw]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<logger level="INFO" doc:name="log-request" doc:id="cc5dc27d-f17d-4483-97be-e18ce9e5a1fa" message="#[payload]"/>
+		<flow-ref doc:name="origPayload" doc:id="997f404a-46cc-45ed-bd04-e547c44c9d3b" name="amazon-s3-authentication-header-create"/>
+		<logger level="INFO" doc:name="Log-AWS-Authentication-headers" doc:id="9d3a3b16-e74e-4c2b-812c-09b4a96bf2be" message="#[payload]"/>
+		<ee:transform doc:name="set-response" doc:id="f5b3ca3c-74c6-4545-af31-7ca7141b806a" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+vars.AWS_Authorization_Headers]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+	<sub-flow name="amazon-s3-authentication-header-create" doc:id="59820022-74cf-40d8-9e86-366dde3af136" >
+		<ee:transform doc:name="Transform Message" doc:id="a9fefe3c-28c8-469b-8d46-00a181c1cc06" >
+			<ee:message >
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="AWS_Authorization_Headers" ><![CDATA[%dw 2.0
+output application/java
+import * from dw::core::URL
+import java!java::lang::System
+import * from dw::core::Binaries
+import dw::Crypto
+
+//Create Some AWS Constants that we will need
+     var AwsIAMConstants = {
+          awsDateTimeFormat   : "yyyyMMdd'T'HHmmss",
+          awsDateFormat       : "yyyyMMdd",
+          iamAlgo             : "AWS4-HMAC-SHA256",
+          iamReqId            : "aws4_request",
+          iamExpiry           : "30",
+          iamHost             : p("aws.s3.service.api.uri.hostname"),
+          iamService          : p("aws.s3.service.api.service"),
+          iamRegion           : p("aws.s3.service.api.region")
+     }
+
+// Generate the line Separator. We should be able to hardcode "\n" as well
+     var ln                         = System::lineSeparator()
+
+     var method               = p("aws.s3.service.api.httpmethod") default ""
+     var uri                  = p("aws.s3.service.api.path") default ""
+     var qParam               = p("aws.s3.service.api.queryString") default ""
+     var accessKey            = Mule::p("secure::aws.s3.service.access_key")
+     var secretKey            = Mule::p("secure::aws.s3.service.secret_key")
+     //var accessToken          = vars.access_token
+
+     var amzDate              = ((now() >> "UTC") as String {format: AwsIAMConstants.awsDateTimeFormat}) ++ "Z"
+     var dateStamp            = ((now() >> "UTC") as String {format: AwsIAMConstants.awsDateFormat}) 
+
+                                                        
+// Derive the Payload Hash. In our case payload is Empty
+     var  payloadHash         = lower(toHex(Crypto::hashWith((vars.origPayload default "") as Binary, "SHA-256")) as String)
+
+// Generate the canonicalHeader, credentialScope and the strSignedHdr.
+     var strCanonicalHeader   = "host:" ++ AwsIAMConstants.iamHost ++ ln ++ "x-amz-content-sha256:" ++ payloadHash ++ ln ++ "x-amz-date:" ++ amzDate ++ ln
+     var strSignedHdr         = "host;x-amz-content-sha256;x-amz-date"
+     var credentialScope      = dateStamp ++ "/" ++ AwsIAMConstants.iamRegion ++ "/" ++ AwsIAMConstants.iamService ++ "/" ++ AwsIAMConstants.iamReqId
+
+// Derive the Canonical Request and Hash the same 
+     var strCanonicalReq      = method ++ ln ++ uri ++ ln ++ qParam ++ ln ++ strCanonicalHeader ++ ln ++ strSignedHdr ++ ln ++ payloadHash
+     var hashCanonicalReq     = lower(toHex(Crypto::hashWith(strCanonicalReq as Binary, "SHA-256")) as String)
+
+// Derive the StringToSign
+     var strToSign            = AwsIAMConstants.iamAlgo ++ ln ++ amzDate ++ ln ++ credentialScope ++ ln ++ hashCanonicalReq
+
+// Derive the Signature using 4 step 
+     var kDate = Crypto::HMACBinary ("AWS4" ++ secretKey as Binary, dateStamp as Binary, "HmacSHA256")
+     var kRegion = Crypto::HMACBinary (kDate  as Binary, AwsIAMConstants.iamRegion as Binary, "HmacSHA256") 
+     var kService = Crypto::HMACBinary (kRegion as Binary, AwsIAMConstants.iamService as Binary, "HmacSHA256")
+     var kSigning = Crypto::HMACBinary (kService as Binary, AwsIAMConstants.iamReqId as Binary, "HmacSHA256")
+     var signature = Crypto::HMACWith (kSigning as Binary, strToSign as Binary, "HmacSHA256")
+
+	 var AuthenticationHeader = 'AWS4-HMAC-SHA256 Credential=$(accessKey)/$(dateStamp)/$(AwsIAMConstants.iamRegion)/$(AwsIAMConstants.iamService)/aws4_request, SignedHeaders=$(strSignedHdr), Signature=$(signature)'
+
+---
+// Required Headers
+{
+	// These are for troubleshooting and testing 
+	"CanonicalRequest": strCanonicalReq,
+	"CanonicalRequestHash": hashCanonicalReq,
+	"host": AwsIAMConstants.iamHost,
+
+	// Required Headers for the AMS Signature 
+	"Authentication" : AuthenticationHeader,
+	"x-amz-content-sha256" : payloadHash,
+	"x-amz-date" : amzDate
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+	</sub-flow>
+</mule>
